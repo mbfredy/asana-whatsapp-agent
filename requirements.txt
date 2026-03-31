@@ -1,0 +1,9 @@
+Flask==3.0.0
+Werkzeug==3.0.1
+Twilio==8.10.0
+anthropic==0.25.9
+requests==2.31.0
+APScheduler==3.10.4
+pytz==2024.1
+gunicorn==21.2.0
+python-dotenv==1.0.0
