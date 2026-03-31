@@ -248,10 +248,10 @@ def init_scheduler():
     return scheduler
 
 
+# Initialize scheduler when module is loaded (works with gunicorn)
+scheduler = init_scheduler()
+
 if __name__ == '__main__':
-    # Initialize scheduler
-    scheduler = init_scheduler()
-    
-    # Run Flask app
+    # Run Flask app directly (for local dev)
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
