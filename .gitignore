@@ -60,3 +60,4 @@ htmlcov/
 # Deployment
 *.pem
 *.key
+.python-version
