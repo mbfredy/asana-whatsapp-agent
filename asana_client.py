@@ -39,18 +39,27 @@ class AsanaClient:
     def get_my_tasks(self):
         """Get incomplete tasks assigned to the current user."""
         try:
-            # First, get current user
+            # First, get current user and workspace
             user_response = self._make_request('GET', '/users/me')
             user_id = user_response['data']['gid']
-            
-            # Get incomplete tasks assigned to user
+            workspace_id = user_response['data']['workspaces'][0]['gid']
+
+            # Get incomplete tasks assigned to user using user task list
             params = {
-                'assignee': user_id,
                 'completed_since': 'now',
-                'opt_fields': 'gid,name,due_on,completed,projects.name,custom_fields'
+                'opt_fields': 'gid,name,due_on,completed,projects.name'
             }
-            
-            response = self._make_request('GET', '/tasks', params=params)
+
+            response = self._make_request('GET', f'/user_task_lists/{user_id}/tasks', params=params)
+            # Fallback: try workspace search if user_task_lists fails
+            if not response.get('data'):
+                params = {
+                    'opt_fields': 'gid,name,due_on,completed,projects.name',
+                    'assignee.any': user_id,
+                    'completed': 'false',
+                    'limit': 50
+                }
+                response = self._make_request('GET', f'/workspaces/{workspace_id}/tasks/search', params=params)
             return response.get('data', [])
         
         except Exception as e:

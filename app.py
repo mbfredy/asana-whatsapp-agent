@@ -125,7 +125,7 @@ def process_message_with_claude(user_message, user_phone):
         
         # Call Claude with Asana context
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-5-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=1024,
             system=SYSTEM_PROMPT + "\n\n" + asana_context,
             messages=messages_for_claude
