@@ -188,15 +188,16 @@ def get_asana_tools(user_name, role="chief_of_staff"):
     return base_tools
 
 
-def get_system_prompt(user_name, role="chief_of_staff"):
+def get_system_prompt(user_name, role="chief_of_staff", project_name=None):
     """Return the system prompt personalized for the user and their role."""
     first_name = user_name.split()[0]
 
     if role == "project_manager":
+        project_label = f"the *{project_name}* project" if project_name else "all projects"
         return f"""You are {first_name}'s AI project management assistant on WhatsApp, connected live to the Asana workspace at DreamFields/Jeeter.
 You can READ, UPDATE, COMMENT ON, and ASSIGN tasks in Asana on {first_name}'s behalf using the tools provided.
 
-ROLE: {first_name} is a *Project Manager*. Her view is team-wide, not personal. She needs to see ALL tasks across projects she manages — not just her own.
+ROLE: {first_name} is a *Project Manager*. Her primary board is {project_label}. All team-wide tools (overdue, due soon, long-term, unassigned) are scoped to this project automatically. She needs to see ALL tasks in {project_label} — not just her own.
 
 CORE RESPONSIBILITIES
 1. Show {first_name} the full picture across all projects and team members.
@@ -295,7 +296,7 @@ BEHAVIOR RULES:
 - Always address the user as {first_name}."""
 
 
-def execute_tool(tool_name, tool_input, user_asana):
+def execute_tool(tool_name, tool_input, user_asana, project_gid=None):
     """Execute an Asana tool call and return the result. Uses the per-user Asana client."""
     try:
         if tool_name == "get_my_tasks":
@@ -345,21 +346,21 @@ def execute_tool(tool_name, tool_input, user_asana):
         elif tool_name == "get_projects":
             result = user_asana.get_projects()
             return json.dumps(result, default=str)
-        # PM-specific tools
+        # PM-specific tools (scoped to project if configured)
         elif tool_name == "get_team_tasks_due_soon":
             days = tool_input.get("days", 5)
-            result = user_asana.get_team_tasks_due_soon(days=days)
+            result = user_asana.get_team_tasks_due_soon(days=days, project_gid=project_gid)
             return json.dumps(result, default=str)
         elif tool_name == "get_team_tasks_overdue":
-            result = user_asana.get_team_tasks_overdue()
+            result = user_asana.get_team_tasks_overdue(project_gid=project_gid)
             return json.dumps(result, default=str)
         elif tool_name == "get_team_tasks_long_term":
             start_days = tool_input.get("start_days", 6)
             end_days = tool_input.get("end_days", 30)
-            result = user_asana.get_team_tasks_long_term(start_days=start_days, end_days=end_days)
+            result = user_asana.get_team_tasks_long_term(start_days=start_days, end_days=end_days, project_gid=project_gid)
             return json.dumps(result, default=str)
         elif tool_name == "get_unassigned_tasks":
-            result = user_asana.get_unassigned_tasks()
+            result = user_asana.get_unassigned_tasks(project_gid=project_gid)
             return json.dumps(result, default=str)
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
@@ -396,7 +397,9 @@ def process_message_with_claude(user_message, user_phone):
 
         # Get personalized system prompt and tools for this user
         user_role = user_info.get('role', 'chief_of_staff')
-        system_prompt = get_system_prompt(user_name, role=user_role)
+        user_project_gid = user_info.get('project_gid', None)
+        user_project_name = user_info.get('project_name', None)
+        system_prompt = get_system_prompt(user_name, role=user_role, project_name=user_project_name)
         tools = get_asana_tools(user_name, role=user_role)
 
         # Initial Claude call with tools
@@ -423,7 +426,7 @@ def process_message_with_claude(user_message, user_phone):
                     tool_input = block.input
                     logger.info(f"[{user_name}] Tool call: {tool_name}({json.dumps(tool_input)})")
 
-                    result = execute_tool(tool_name, tool_input, user_asana)
+                    result = execute_tool(tool_name, tool_input, user_asana, project_gid=user_project_gid)
                     logger.info(f"Tool result preview: {result[:200]}")
 
                     tool_results.append({
@@ -574,8 +577,10 @@ def send_morning_digest():
             user_asana = user_asana_clients[phone_key]
 
             user_role = user_info.get('role', 'chief_of_staff')
-            logger.info(f"Generating morning digest for {user_name} (role: {user_role})...")
-            digest_text = generate_digest(user_asana, user_name=user_name, role=user_role)
+            user_project_gid = user_info.get('project_gid', None)
+            user_project_name = user_info.get('project_name', None)
+            logger.info(f"Generating morning digest for {user_name} (role: {user_role}, project: {user_project_name})...")
+            digest_text = generate_digest(user_asana, user_name=user_name, role=user_role, project_gid=user_project_gid, project_name=user_project_name)
             digest_text = format_for_whatsapp(digest_text)
 
             chunks = split_message(digest_text, max_len=1500)

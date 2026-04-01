@@ -4,8 +4,8 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
-def generate_pm_digest(asana_client, user_name="Daniella Aservi"):
-    """Generate a PM-focused morning digest: team-wide tasks due within 5 days + long-term."""
+def generate_pm_digest(asana_client, user_name="Daniella Aservi", project_gid=None, project_name=None):
+    """Generate a PM-focused morning digest scoped to a specific project."""
     try:
         parts = []
         first_name = user_name.split()[0]
@@ -16,11 +16,13 @@ def generate_pm_digest(asana_client, user_name="Daniella Aservi"):
 
         parts.append(f"Good morning, {first_name} \u2615\n")
         parts.append(f"\U0001f4c5 *{day_name}, {date_str}*\n")
+        if project_name:
+            parts.append(f"\U0001f4c1 *{project_name}*\n")
         parts.append("\u2500" * 20 + "\n")
 
-        # ── Overdue (team-wide) ──
+        # ── Overdue (scoped to project if configured) ──
         try:
-            overdue = asana_client.get_team_tasks_overdue()
+            overdue = asana_client.get_team_tasks_overdue(project_gid=project_gid)
             if overdue:
                 parts.append(f"\n\U0001f6a8 *OVERDUE* ({len(overdue)})\n")
                 by_assignee = {}
@@ -39,7 +41,7 @@ def generate_pm_digest(asana_client, user_name="Daniella Aservi"):
 
         # ── Due within 5 days (team-wide) ──
         try:
-            due_soon = asana_client.get_team_tasks_due_soon(days=5)
+            due_soon = asana_client.get_team_tasks_due_soon(days=5, project_gid=project_gid)
             due_today = [t for t in due_soon if t.get('due_on') == today_str]
             due_rest = [t for t in due_soon if t.get('due_on') and t.get('due_on') != today_str]
 
@@ -67,7 +69,7 @@ def generate_pm_digest(asana_client, user_name="Daniella Aservi"):
 
         # ── Long-term (6-30 days) ──
         try:
-            long_term = asana_client.get_team_tasks_long_term(start_days=6, end_days=30)
+            long_term = asana_client.get_team_tasks_long_term(start_days=6, end_days=30, project_gid=project_gid)
             if long_term:
                 parts.append(f"\n\U0001f4c6 *UPCOMING (6-30 DAYS)* ({len(long_term)})\n")
                 for t in long_term[:10]:
@@ -83,7 +85,7 @@ def generate_pm_digest(asana_client, user_name="Daniella Aservi"):
 
         # ── Risks: unassigned tasks ──
         try:
-            unassigned = asana_client.get_unassigned_tasks()
+            unassigned = asana_client.get_unassigned_tasks(project_gid=project_gid)
             if unassigned:
                 parts.append(f"\n\u26a0\ufe0f *NEEDS ASSIGNMENT* ({len(unassigned)})\n")
                 for t in unassigned[:8]:
@@ -127,10 +129,10 @@ def generate_pm_digest(asana_client, user_name="Daniella Aservi"):
         return "\u26a0\ufe0f Unable to generate morning digest. Reply with a message and I'll pull the info manually."
 
 
-def generate_digest(asana_client, user_name="Fredy Hernandez", role="chief_of_staff"):
+def generate_digest(asana_client, user_name="Fredy Hernandez", role="chief_of_staff", project_gid=None, project_name=None):
     """Generate a formatted morning digest from Asana data."""
     if role == "project_manager":
-        return generate_pm_digest(asana_client, user_name=user_name)
+        return generate_pm_digest(asana_client, user_name=user_name, project_gid=project_gid, project_name=project_name)
     try:
         parts = []
         first_name = user_name.split()[0]

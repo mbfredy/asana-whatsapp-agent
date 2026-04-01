@@ -225,8 +225,8 @@ class AsanaClient:
             logger.error(f"Error getting new tasks: {str(e)}")
             return []
 
-    def get_team_tasks_due_soon(self, days=5):
-        """Get ALL incomplete tasks across the workspace due within N days (PM view)."""
+    def get_team_tasks_due_soon(self, days=5, project_gid=None):
+        """Get ALL incomplete tasks due within N days (PM view). Optionally filter by project."""
         try:
             self._ensure_user_info()
             today = datetime.utcnow().strftime('%Y-%m-%d')
@@ -242,6 +242,8 @@ class AsanaClient:
                 'sort_ascending': 'true',
                 'limit': 100
             }
+            if project_gid:
+                params['projects.any'] = project_gid
 
             response = self._make_request(
                 'GET',
@@ -254,8 +256,8 @@ class AsanaClient:
             logger.error(f"Error getting team tasks due soon: {str(e)}")
             return []
 
-    def get_team_tasks_overdue(self):
-        """Get ALL overdue incomplete tasks across the workspace (PM view)."""
+    def get_team_tasks_overdue(self, project_gid=None):
+        """Get ALL overdue incomplete tasks (PM view). Optionally filter by project."""
         try:
             self._ensure_user_info()
             today = datetime.utcnow().strftime('%Y-%m-%d')
@@ -269,6 +271,8 @@ class AsanaClient:
                 'sort_ascending': 'true',
                 'limit': 100
             }
+            if project_gid:
+                params['projects.any'] = project_gid
 
             response = self._make_request(
                 'GET',
@@ -281,7 +285,7 @@ class AsanaClient:
             logger.error(f"Error getting overdue team tasks: {str(e)}")
             return []
 
-    def get_team_tasks_long_term(self, start_days=6, end_days=30):
+    def get_team_tasks_long_term(self, start_days=6, end_days=30, project_gid=None):
         """Get tasks due between start_days and end_days from now (long-term PM view)."""
         try:
             self._ensure_user_info()
@@ -298,6 +302,8 @@ class AsanaClient:
                 'sort_ascending': 'true',
                 'limit': 50
             }
+            if project_gid:
+                params['projects.any'] = project_gid
 
             response = self._make_request(
                 'GET',
@@ -310,8 +316,8 @@ class AsanaClient:
             logger.error(f"Error getting long-term tasks: {str(e)}")
             return []
 
-    def get_unassigned_tasks(self):
-        """Get incomplete tasks with no assignee (PM risk view)."""
+    def get_unassigned_tasks(self, project_gid=None):
+        """Get incomplete tasks with no assignee (PM risk view). Optionally filter by project."""
         try:
             self._ensure_user_info()
 
@@ -325,6 +331,8 @@ class AsanaClient:
                 'sort_ascending': 'true',
                 'limit': 30
             }
+            if project_gid:
+                params['projects.any'] = project_gid
 
             response = self._make_request(
                 'GET',
