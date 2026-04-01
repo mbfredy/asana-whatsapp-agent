@@ -4,8 +4,133 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
-def generate_digest(asana_client, user_name="Fredy Hernandez"):
+def generate_pm_digest(asana_client, user_name="Daniella Aservi"):
+    """Generate a PM-focused morning digest: team-wide tasks due within 5 days + long-term."""
+    try:
+        parts = []
+        first_name = user_name.split()[0]
+        now = datetime.now()
+        day_name = now.strftime('%A')
+        date_str = now.strftime('%B %d, %Y')
+        today_str = now.strftime('%Y-%m-%d')
+
+        parts.append(f"Good morning, {first_name} \u2615\n")
+        parts.append(f"\U0001f4c5 *{day_name}, {date_str}*\n")
+        parts.append("\u2500" * 20 + "\n")
+
+        # ── Overdue (team-wide) ──
+        try:
+            overdue = asana_client.get_team_tasks_overdue()
+            if overdue:
+                parts.append(f"\n\U0001f6a8 *OVERDUE* ({len(overdue)})\n")
+                by_assignee = {}
+                for t in overdue:
+                    assignee = t.get('assignee', {})
+                    name = assignee.get('name', 'Unassigned') if assignee else 'Unassigned'
+                    by_assignee.setdefault(name, []).append(t)
+                for assignee, tasks in sorted(by_assignee.items()):
+                    parts.append(f"\n   \U0001f464 *{assignee}*\n")
+                    for t in tasks[:5]:
+                        project = t.get('projects', [{}])[0].get('name', '') if t.get('projects') else ''
+                        parts.append(f"      \u26a0\ufe0f {t['name']}\n")
+                        parts.append(f"         Due {t.get('due_on', '?')}  \u2022  {project}\n")
+        except Exception as e:
+            logger.error(f"PM digest overdue error: {e}")
+
+        # ── Due within 5 days (team-wide) ──
+        try:
+            due_soon = asana_client.get_team_tasks_due_soon(days=5)
+            due_today = [t for t in due_soon if t.get('due_on') == today_str]
+            due_rest = [t for t in due_soon if t.get('due_on') and t.get('due_on') != today_str]
+
+            if due_today:
+                parts.append(f"\n\U0001f525 *DUE TODAY* ({len(due_today)})\n")
+                for t in due_today:
+                    assignee = t.get('assignee', {})
+                    name = assignee.get('name', 'Unassigned') if assignee else 'Unassigned'
+                    project = t.get('projects', [{}])[0].get('name', '') if t.get('projects') else ''
+                    parts.append(f"   \u27a1\ufe0f {t['name']}\n")
+                    parts.append(f"      \U0001f464 {name}  \u2022  \U0001f4c1 {project}\n")
+
+            if due_rest:
+                parts.append(f"\n\U0001f4c5 *NEXT 5 DAYS* ({len(due_rest)})\n")
+                for t in sorted(due_rest, key=lambda x: x.get('due_on', ''))[:15]:
+                    assignee = t.get('assignee', {})
+                    name = assignee.get('name', 'Unassigned') if assignee else 'Unassigned'
+                    project = t.get('projects', [{}])[0].get('name', '') if t.get('projects') else ''
+                    parts.append(f"   \u2022 {t['name']}\n")
+                    parts.append(f"      \U0001f464 {name}  \u2022  Due {t.get('due_on')}  \u2022  {project}\n")
+                if len(due_rest) > 15:
+                    parts.append(f"   _...and {len(due_rest) - 15} more_\n")
+        except Exception as e:
+            logger.error(f"PM digest due-soon error: {e}")
+
+        # ── Long-term (6-30 days) ──
+        try:
+            long_term = asana_client.get_team_tasks_long_term(start_days=6, end_days=30)
+            if long_term:
+                parts.append(f"\n\U0001f4c6 *UPCOMING (6-30 DAYS)* ({len(long_term)})\n")
+                for t in long_term[:10]:
+                    assignee = t.get('assignee', {})
+                    name = assignee.get('name', 'Unassigned') if assignee else 'Unassigned'
+                    project = t.get('projects', [{}])[0].get('name', '') if t.get('projects') else ''
+                    parts.append(f"   \u2022 {t['name']}\n")
+                    parts.append(f"      \U0001f464 {name}  \u2022  Due {t.get('due_on')}  \u2022  {project}\n")
+                if len(long_term) > 10:
+                    parts.append(f"   _...and {len(long_term) - 10} more_\n")
+        except Exception as e:
+            logger.error(f"PM digest long-term error: {e}")
+
+        # ── Risks: unassigned tasks ──
+        try:
+            unassigned = asana_client.get_unassigned_tasks()
+            if unassigned:
+                parts.append(f"\n\u26a0\ufe0f *NEEDS ASSIGNMENT* ({len(unassigned)})\n")
+                for t in unassigned[:8]:
+                    project = t.get('projects', [{}])[0].get('name', '') if t.get('projects') else ''
+                    due = t.get('due_on', 'No date')
+                    parts.append(f"   \u2022 {t['name']}\n")
+                    parts.append(f"      {project}  \u2022  {due}\n")
+        except Exception as e:
+            logger.error(f"PM digest unassigned error: {e}")
+
+        # ── Recently updated ──
+        try:
+            recent = asana_client.get_recent_tasks(days=1)
+            if recent:
+                parts.append(f"\n\U0001f504 *RECENTLY UPDATED*\n")
+                for t in recent[:5]:
+                    project = t.get('projects', [{}])[0].get('name', '') if t.get('projects') else ''
+                    assignee = t.get('assignee', {})
+                    name = assignee.get('name', '') if assignee else ''
+                    parts.append(f"   \u2022 {t['name']}")
+                    if name:
+                        parts.append(f"  ({name})")
+                    if project:
+                        parts.append(f"  \u2022  {project}")
+                    parts.append("\n")
+        except Exception as e:
+            logger.error(f"PM digest recent error: {e}")
+
+        # ── Footer / Summary ──
+        parts.append("\n" + "\u2500" * 20 + "\n")
+        overdue_count = len(overdue) if 'overdue' in dir() else 0
+        due_soon_count = len(due_soon) if 'due_soon' in dir() else 0
+        unassigned_count = len(unassigned) if 'unassigned' in dir() else 0
+        parts.append(f"\U0001f4ca *Summary:* {due_soon_count} tasks due within 5 days  \u2022  {overdue_count} overdue  \u2022  {unassigned_count} unassigned\n")
+        parts.append(f"\n\U0001f4ac Reply anytime to ask about tasks, reassign work, or check on specific projects.\n")
+
+        return ''.join(parts)
+
+    except Exception as e:
+        logger.error(f"Error generating PM digest: {str(e)}")
+        return "\u26a0\ufe0f Unable to generate morning digest. Reply with a message and I'll pull the info manually."
+
+
+def generate_digest(asana_client, user_name="Fredy Hernandez", role="chief_of_staff"):
     """Generate a formatted morning digest from Asana data."""
+    if role == "project_manager":
+        return generate_pm_digest(asana_client, user_name=user_name)
     try:
         parts = []
         first_name = user_name.split()[0]

@@ -225,6 +225,118 @@ class AsanaClient:
             logger.error(f"Error getting new tasks: {str(e)}")
             return []
 
+    def get_team_tasks_due_soon(self, days=5):
+        """Get ALL incomplete tasks across the workspace due within N days (PM view)."""
+        try:
+            self._ensure_user_info()
+            today = datetime.utcnow().strftime('%Y-%m-%d')
+            end_date = (datetime.utcnow() + timedelta(days=days)).strftime('%Y-%m-%d')
+
+            params = {
+                'opt_fields': 'gid,name,due_on,projects.name,assignee.name,modified_at,completed',
+                'due_on.after': today,
+                'due_on.before': end_date,
+                'completed': 'false',
+                'is_subtask': 'false',
+                'sort_by': 'due_date',
+                'sort_ascending': 'true',
+                'limit': 100
+            }
+
+            response = self._make_request(
+                'GET',
+                f'/workspaces/{self._workspace_gid}/tasks/search',
+                params=params
+            )
+            return response.get('data', [])
+
+        except Exception as e:
+            logger.error(f"Error getting team tasks due soon: {str(e)}")
+            return []
+
+    def get_team_tasks_overdue(self):
+        """Get ALL overdue incomplete tasks across the workspace (PM view)."""
+        try:
+            self._ensure_user_info()
+            today = datetime.utcnow().strftime('%Y-%m-%d')
+
+            params = {
+                'opt_fields': 'gid,name,due_on,projects.name,assignee.name,modified_at',
+                'due_on.before': today,
+                'completed': 'false',
+                'is_subtask': 'false',
+                'sort_by': 'due_date',
+                'sort_ascending': 'true',
+                'limit': 100
+            }
+
+            response = self._make_request(
+                'GET',
+                f'/workspaces/{self._workspace_gid}/tasks/search',
+                params=params
+            )
+            return response.get('data', [])
+
+        except Exception as e:
+            logger.error(f"Error getting overdue team tasks: {str(e)}")
+            return []
+
+    def get_team_tasks_long_term(self, start_days=6, end_days=30):
+        """Get tasks due between start_days and end_days from now (long-term PM view)."""
+        try:
+            self._ensure_user_info()
+            start_date = (datetime.utcnow() + timedelta(days=start_days)).strftime('%Y-%m-%d')
+            end_date = (datetime.utcnow() + timedelta(days=end_days)).strftime('%Y-%m-%d')
+
+            params = {
+                'opt_fields': 'gid,name,due_on,projects.name,assignee.name',
+                'due_on.after': start_date,
+                'due_on.before': end_date,
+                'completed': 'false',
+                'is_subtask': 'false',
+                'sort_by': 'due_date',
+                'sort_ascending': 'true',
+                'limit': 50
+            }
+
+            response = self._make_request(
+                'GET',
+                f'/workspaces/{self._workspace_gid}/tasks/search',
+                params=params
+            )
+            return response.get('data', [])
+
+        except Exception as e:
+            logger.error(f"Error getting long-term tasks: {str(e)}")
+            return []
+
+    def get_unassigned_tasks(self):
+        """Get incomplete tasks with no assignee (PM risk view)."""
+        try:
+            self._ensure_user_info()
+
+            params = {
+                'opt_fields': 'gid,name,due_on,projects.name,created_at',
+                'assignee.any': 'null',
+                'completed': 'false',
+                'modified_on.after': '2025-01-01',
+                'is_subtask': 'false',
+                'sort_by': 'due_date',
+                'sort_ascending': 'true',
+                'limit': 30
+            }
+
+            response = self._make_request(
+                'GET',
+                f'/workspaces/{self._workspace_gid}/tasks/search',
+                params=params
+            )
+            return response.get('data', [])
+
+        except Exception as e:
+            logger.error(f"Error getting unassigned tasks: {str(e)}")
+            return []
+
     def search_tasks(self, query):
         """Search tasks by text query. Only returns tasks modified since 2025."""
         try:
