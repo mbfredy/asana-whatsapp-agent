@@ -52,8 +52,13 @@ class AsanaClient:
 
     # ─── READ OPERATIONS ───
 
-    def get_my_tasks(self):
-        """Get incomplete tasks assigned to the current user."""
+    def get_my_tasks(self, recent_only=True):
+        """Get incomplete tasks assigned to the current user.
+
+        If recent_only is True (default), filters out stale tasks:
+        only returns tasks that have a due date in 2025+ OR were modified
+        in the last 90 days. This avoids surfacing ancient 2021-era tasks.
+        """
         try:
             self._ensure_user_info()
 
@@ -68,11 +73,31 @@ class AsanaClient:
             # Step 2: Get incomplete tasks from that task list
             params = {
                 'completed_since': 'now',
-                'opt_fields': 'gid,name,due_on,projects.name,assignee.name,custom_fields.name,custom_fields.display_value',
+                'opt_fields': 'gid,name,due_on,created_at,modified_at,projects.name,assignee.name,custom_fields.name,custom_fields.display_value',
                 'limit': 100
             }
             response = self._make_request('GET', f'/user_task_lists/{task_list_gid}/tasks', params=params)
-            return response.get('data', [])
+            tasks = response.get('data', [])
+
+            if recent_only:
+                cutoff_date = (datetime.utcnow() - timedelta(days=90)).strftime('%Y-%m-%d')
+                min_due_year = '2025'
+                filtered = []
+                for task in tasks:
+                    due_on = task.get('due_on') or ''
+                    modified_at = (task.get('modified_at') or '')[:10]
+                    created_at = (task.get('created_at') or '')[:10]
+
+                    # Keep if: due date is 2025+, OR modified in last 90 days, OR created in last 90 days
+                    if due_on >= min_due_year:
+                        filtered.append(task)
+                    elif modified_at >= cutoff_date:
+                        filtered.append(task)
+                    elif created_at >= cutoff_date:
+                        filtered.append(task)
+                return filtered
+
+            return tasks
 
         except Exception as e:
             logger.error(f"Error getting my tasks: {str(e)}")
@@ -201,13 +226,16 @@ class AsanaClient:
             return []
 
     def search_tasks(self, query):
-        """Search tasks by text query."""
+        """Search tasks by text query. Only returns tasks modified since 2025."""
         try:
             self._ensure_user_info()
 
             params = {
-                'opt_fields': 'gid,name,due_on,projects.name,assignee.name',
+                'opt_fields': 'gid,name,due_on,projects.name,assignee.name,modified_at',
                 'text': query,
+                'modified_on.after': '2025-01-01',
+                'sort_by': 'modified_at',
+                'sort_ascending': 'false',
                 'limit': 20
             }
 
