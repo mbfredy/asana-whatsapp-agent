@@ -41,6 +41,33 @@ def load_config():
 
 config = load_config()
 anthropic_client = Anthropic(api_key=config.get('anthropic_api_key'))
+
+# ─── Multi-User Setup ───
+# Load user configs: maps "whatsapp:+1XXXXXXXXXX" -> {name, asana_pat, asana_gid}
+USERS = {}
+try:
+    users_json = os.getenv('USERS_CONFIG', '{}')
+    USERS = json.loads(users_json)
+    logger.info(f"Loaded {len(USERS)} user(s): {[u['name'] for u in USERS.values()]}")
+except Exception as e:
+    logger.error(f"Error loading USERS_CONFIG: {e}")
+
+# Fallback: if no USERS_CONFIG, use the single ASANA_PAT for the default user
+DEFAULT_PHONE = os.getenv('DIGEST_RECIPIENT_PHONE', '+19545042855')
+if not USERS:
+    USERS[f'whatsapp:{DEFAULT_PHONE}'] = {
+        'name': 'Fredy Hernandez',
+        'asana_pat': config.get('asana_pat'),
+        'asana_gid': '1200045933988109'
+    }
+
+# Create an AsanaClient per user (keyed by whatsapp phone key)
+user_asana_clients = {}
+for phone_key, user_info in USERS.items():
+    user_asana_clients[phone_key] = AsanaClient(user_info['asana_pat'])
+    logger.info(f"Asana client created for {user_info['name']} ({phone_key})")
+
+# Keep a default client for backward compatibility
 asana_client = AsanaClient(config.get('asana_pat'))
 
 # Conversation history storage (per user)
@@ -48,153 +75,99 @@ conversation_history = {}
 MAX_HISTORY = 20
 
 
+def get_user_info(sender_phone):
+    """Look up user info by their WhatsApp sender ID (e.g. 'whatsapp:+15617890332' or '+15617890332')."""
+    # Try with whatsapp: prefix
+    key = f'whatsapp:{sender_phone}' if not sender_phone.startswith('whatsapp:') else sender_phone
+    if key in USERS:
+        return USERS[key], user_asana_clients[key]
+    # Try raw phone
+    for k, v in USERS.items():
+        if sender_phone in k or k.endswith(sender_phone):
+            return v, user_asana_clients[k]
+    # Fallback to default (Fredy)
+    default_key = f'whatsapp:{DEFAULT_PHONE}'
+    return USERS.get(default_key, {'name': 'there'}), asana_client
+
+
 # ─── Tools Definition for Claude ───
 
-ASANA_TOOLS = [
-    {
-        "name": "get_my_tasks",
-        "description": "Get all incomplete tasks assigned to Fredy. Returns task name, project, due date, and GID.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
+def get_asana_tools(user_name):
+    """Return tool definitions personalized for the user."""
+    return [
+        {
+            "name": "get_my_tasks",
+            "description": f"Get all incomplete tasks assigned to {user_name}. Returns task name, project, due date, and GID.",
+            "input_schema": {"type": "object", "properties": {}, "required": []}
+        },
+        {
+            "name": "get_task_details",
+            "description": "Get full details of a specific task including notes/description, assignee, and projects.",
+            "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The Asana task GID"}}, "required": ["task_id"]}
+        },
+        {
+            "name": "get_task_comments",
+            "description": "Get the most recent comments on a task.",
+            "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The Asana task GID"}}, "required": ["task_id"]}
+        },
+        {
+            "name": "search_tasks",
+            "description": "Search for tasks by keyword. Use this when the user mentions a task by name or topic.",
+            "input_schema": {"type": "object", "properties": {"query": {"type": "string", "description": "Search query text"}}, "required": ["query"]}
+        },
+        {
+            "name": "update_task",
+            "description": "Update a task's name, notes/description, or due date.",
+            "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The Asana task GID"}, "name": {"type": "string", "description": "New task name (optional)"}, "notes": {"type": "string", "description": "New task description/notes (optional)"}, "due_on": {"type": "string", "description": "New due date in YYYY-MM-DD format (optional)"}}, "required": ["task_id"]}
+        },
+        {
+            "name": "complete_task",
+            "description": "Mark a task as complete/done.",
+            "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The Asana task GID"}}, "required": ["task_id"]}
+        },
+        {
+            "name": "add_comment",
+            "description": f"Add a comment to a task. The comment will be posted as {user_name}.",
+            "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The Asana task GID"}, "text": {"type": "string", "description": "The comment text to post"}}, "required": ["task_id", "text"]}
+        },
+        {
+            "name": "assign_task",
+            "description": "Assign a task to a team member. First search for the user by name, then assign.",
+            "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The Asana task GID"}, "assignee_name": {"type": "string", "description": "Name (or partial name) of the person to assign the task to"}}, "required": ["task_id", "assignee_name"]}
+        },
+        {
+            "name": "find_team_member",
+            "description": "Look up a team member by name to get their Asana user GID. Use before assigning tasks.",
+            "input_schema": {"type": "object", "properties": {"name": {"type": "string", "description": "Name or partial name of the person"}}, "required": ["name"]}
+        },
+        {
+            "name": "get_recent_activity",
+            "description": f"Get tasks that were recently modified (last N days).",
+            "input_schema": {"type": "object", "properties": {"days": {"type": "integer", "description": "Number of days to look back (default 7)", "default": 7}}, "required": []}
+        },
+        {
+            "name": "get_new_tasks",
+            "description": f"Get newly assigned tasks from the last N days that {user_name} might have missed.",
+            "input_schema": {"type": "object", "properties": {"days": {"type": "integer", "description": "Number of days to look back (default 1)", "default": 1}}, "required": []}
+        },
+        {
+            "name": "get_projects",
+            "description": "List all projects in the workspace.",
+            "input_schema": {"type": "object", "properties": {}, "required": []}
         }
-    },
-    {
-        "name": "get_task_details",
-        "description": "Get full details of a specific task including notes/description, assignee, and projects.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "The Asana task GID"}
-            },
-            "required": ["task_id"]
-        }
-    },
-    {
-        "name": "get_task_comments",
-        "description": "Get the most recent comments on a task.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "The Asana task GID"}
-            },
-            "required": ["task_id"]
-        }
-    },
-    {
-        "name": "search_tasks",
-        "description": "Search for tasks by keyword. Use this when the user mentions a task by name or topic.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query text"}
-            },
-            "required": ["query"]
-        }
-    },
-    {
-        "name": "update_task",
-        "description": "Update a task's name, notes/description, or due date.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "The Asana task GID"},
-                "name": {"type": "string", "description": "New task name (optional)"},
-                "notes": {"type": "string", "description": "New task description/notes (optional)"},
-                "due_on": {"type": "string", "description": "New due date in YYYY-MM-DD format (optional)"}
-            },
-            "required": ["task_id"]
-        }
-    },
-    {
-        "name": "complete_task",
-        "description": "Mark a task as complete/done.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "The Asana task GID"}
-            },
-            "required": ["task_id"]
-        }
-    },
-    {
-        "name": "add_comment",
-        "description": "Add a comment to a task. The comment will be posted as Fredy.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "The Asana task GID"},
-                "text": {"type": "string", "description": "The comment text to post"}
-            },
-            "required": ["task_id", "text"]
-        }
-    },
-    {
-        "name": "assign_task",
-        "description": "Assign a task to a team member. First search for the user by name, then assign.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "The Asana task GID"},
-                "assignee_name": {"type": "string", "description": "Name (or partial name) of the person to assign the task to"}
-            },
-            "required": ["task_id", "assignee_name"]
-        }
-    },
-    {
-        "name": "find_team_member",
-        "description": "Look up a team member by name to get their Asana user GID. Use before assigning tasks.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Name or partial name of the person"}
-            },
-            "required": ["name"]
-        }
-    },
-    {
-        "name": "get_recent_activity",
-        "description": "Get tasks that were recently modified (last N days).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "days": {"type": "integer", "description": "Number of days to look back (default 7)", "default": 7}
-            },
-            "required": []
-        }
-    },
-    {
-        "name": "get_new_tasks",
-        "description": "Get newly assigned tasks from the last N days that Fredy might have missed.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "days": {"type": "integer", "description": "Number of days to look back (default 1)", "default": 1}
-            },
-            "required": []
-        }
-    },
-    {
-        "name": "get_projects",
-        "description": "List all projects in the workspace.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    }
-]
+    ]
 
 
-SYSTEM_PROMPT = """You are Fredy Hernandez's AI chief of staff on WhatsApp, connected live to his Asana workspace at DreamFields/Jeeter.
-You can READ, UPDATE, COMMENT ON, and ASSIGN tasks in Asana on Fredy's behalf using the tools provided.
+def get_system_prompt(user_name):
+    """Return the system prompt personalized for the user."""
+    return f"""You are {user_name}'s AI chief of staff on WhatsApp, connected live to their Asana workspace at DreamFields/Jeeter.
+You can READ, UPDATE, COMMENT ON, and ASSIGN tasks in Asana on {user_name}'s behalf using the tools provided.
 
 CORE RESPONSIBILITIES
 1. Review all relevant Asana tasks across assigned teams and projects.
-2. Identify: newly created tasks, newly updated tasks, tasks with no brief, tasks with incomplete briefs, tasks where Fredy is the assignee, tasks where Fredy is mentioned in comments, tasks where Fredy is added as collaborator/follower, tasks with due date/status/ownership changes that matter.
-3. Send structured WhatsApp digests and respond to Fredy's requests.
-4. Take action on tasks when Fredy asks (update, comment, assign, complete).
+2. Identify: newly created tasks, newly updated tasks, tasks with no brief, tasks with incomplete briefs, tasks where {user_name} is the assignee, tasks where {user_name} is mentioned in comments, tasks where {user_name} is added as collaborator/follower, tasks with due date/status/ownership changes that matter.
+3. Send structured WhatsApp digests and respond to {user_name}'s requests.
+4. Take action on tasks when {user_name} asks (update, comment, assign, complete).
 
 WHATSAPP FORMAT RULES:
 - Use emojis to make things scannable: \U0001f525 urgent, \u2705 done, \U0001f4cb tasks, \u26a0\ufe0f warning, \U0001f4ac comment, \U0001f464 people, \U0001f4c5 dates, \U0001f4c1 projects, \U0001f6a8 overdue, \U0001f195 new
@@ -206,10 +179,10 @@ WHATSAPP FORMAT RULES:
 - When confirming an action, be brief: "\u2705 Done! Comment posted on [task name]"
 
 ACTION RULES:
-- When Fredy asks to update a task, comment, mark complete, or assign someone: DO IT immediately using the tools. Don't just describe what you would do.
-- When Fredy says "comment on X saying Y" - post the comment using add_comment.
-- When Fredy says "assign X to [person]" - look up the person first with find_team_member, then assign.
-- When Fredy says "mark X as done" or "complete X" - use complete_task.
+- When {user_name} asks to update a task, comment, mark complete, or assign someone: DO IT immediately using the tools. Don't just describe what you would do.
+- When {user_name} says "comment on X saying Y" - post the comment using add_comment.
+- When {user_name} says "assign X to [person]" - look up the person first with find_team_member, then assign.
+- When {user_name} says "mark X as done" or "complete X" - use complete_task.
 - When searching for a task, use search_tasks to find it first, then act on the result.
 - Always confirm the action after completing it.
 
@@ -220,19 +193,19 @@ A task counts as having a valid brief if:
 Mark as *Missing Brief* if: title is vague, description is empty or too thin, deliverable is unclear, no context about objective/audience/timing.
 Mark as *Brief Incomplete* if: some info exists but key parts are missing, doesn't clearly explain the deliverable.
 
-DIGEST STRUCTURE (for morning brief and when Fredy asks "what's on my plate"):
+DIGEST STRUCTURE (for morning brief and when {user_name} asks "what's on my plate"):
 1. \U0001f6a8 *OVERDUE* - Tasks past due date
 2. \U0001f525 *DUE TODAY* - Tasks due today
 3. \U0001f4c6 *THIS WEEK* - Tasks due this week
-4. \U0001f195 *NEW TASKS* - Recently assigned tasks Fredy might have missed
-5. \U0001f4ac *MENTIONS* - Tasks where Fredy is mentioned in comments or added as collaborator
+4. \U0001f195 *NEW TASKS* - Recently assigned tasks {user_name} might have missed
+5. \U0001f4ac *MENTIONS* - Tasks where {user_name} is mentioned in comments or added as collaborator
 6. \u26a0\ufe0f *RISKS / BLOCKERS* - Missing briefs, no assignee, no due date, tight deadlines with weak context, unclear deliverables
 7. \U0001f504 *RECENTLY UPDATED* - Important recent changes
 
 End digests with: \U0001f3af *Top priority today:* [single most important item]
 
 PRIORITIZATION LOGIC (always in this order):
-1. Tasks directly involving Fredy (assigned, mentioned)
+1. Tasks directly involving {user_name} (assigned, mentioned)
 2. New tasks missing briefs
 3. New tasks with valid briefs
 4. Meaningful mentions and comments
@@ -256,75 +229,62 @@ BEHAVIOR RULES:
 - Do not invent missing information.
 - If a task has no real brief, do not pretend it does.
 - If a task is weak, say exactly why it is weak.
-- If something is blocked or at risk, say so clearly."""
+- If something is blocked or at risk, say so clearly.
+- Always address the user as {user_name} (first name only: {user_name.split()[0]})."""
 
 
-def execute_tool(tool_name, tool_input):
-    """Execute an Asana tool call and return the result."""
+def execute_tool(tool_name, tool_input, user_asana):
+    """Execute an Asana tool call and return the result. Uses the per-user Asana client."""
     try:
         if tool_name == "get_my_tasks":
-            result = asana_client.get_my_tasks()
+            result = user_asana.get_my_tasks()
             return json.dumps(result, default=str)
-
         elif tool_name == "get_task_details":
-            result = asana_client.get_task_details(tool_input["task_id"])
+            result = user_asana.get_task_details(tool_input["task_id"])
             return json.dumps(result, default=str)
-
         elif tool_name == "get_task_comments":
-            result = asana_client.get_task_stories(tool_input["task_id"])
+            result = user_asana.get_task_stories(tool_input["task_id"])
             return json.dumps(result, default=str)
-
         elif tool_name == "search_tasks":
-            result = asana_client.search_tasks(tool_input["query"])
+            result = user_asana.search_tasks(tool_input["query"])
             return json.dumps(result, default=str)
-
         elif tool_name == "update_task":
             updates = {}
             for field in ["name", "notes", "due_on"]:
                 if field in tool_input and tool_input[field]:
                     updates[field] = tool_input[field]
-            result = asana_client.update_task(tool_input["task_id"], updates)
+            result = user_asana.update_task(tool_input["task_id"], updates)
             return json.dumps(result, default=str)
-
         elif tool_name == "complete_task":
-            result = asana_client.complete_task(tool_input["task_id"])
+            result = user_asana.complete_task(tool_input["task_id"])
             return json.dumps(result, default=str)
-
         elif tool_name == "add_comment":
-            result = asana_client.add_comment(tool_input["task_id"], tool_input["text"])
+            result = user_asana.add_comment(tool_input["task_id"], tool_input["text"])
             return json.dumps(result, default=str)
-
         elif tool_name == "assign_task":
-            # First find the user
-            user = asana_client.find_user_by_name(tool_input["assignee_name"])
+            user = user_asana.find_user_by_name(tool_input["assignee_name"])
             if not user:
                 return json.dumps({"error": f"Could not find user matching '{tool_input['assignee_name']}'"})
-            result = asana_client.assign_task(tool_input["task_id"], user["gid"])
+            result = user_asana.assign_task(tool_input["task_id"], user["gid"])
             return json.dumps({"success": True, "assigned_to": user["name"], "task": result.get("name", "")}, default=str)
-
         elif tool_name == "find_team_member":
-            user = asana_client.find_user_by_name(tool_input["name"])
+            user = user_asana.find_user_by_name(tool_input["name"])
             if user:
                 return json.dumps(user, default=str)
             return json.dumps({"error": f"No user found matching '{tool_input['name']}'"})
-
         elif tool_name == "get_recent_activity":
             days = tool_input.get("days", 7)
-            result = asana_client.get_recent_tasks(days=days)
+            result = user_asana.get_recent_tasks(days=days)
             return json.dumps(result, default=str)
-
         elif tool_name == "get_new_tasks":
             days = tool_input.get("days", 1)
-            result = asana_client.get_new_tasks_assigned(days=days)
+            result = user_asana.get_new_tasks_assigned(days=days)
             return json.dumps(result, default=str)
-
         elif tool_name == "get_projects":
-            result = asana_client.get_projects()
+            result = user_asana.get_projects()
             return json.dumps(result, default=str)
-
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
-
     except Exception as e:
         logger.error(f"Tool execution error ({tool_name}): {str(e)}")
         return json.dumps({"error": str(e)})
@@ -348,15 +308,24 @@ def add_to_history(user_phone, role, content):
 def process_message_with_claude(user_message, user_phone):
     """Process user message with Claude using tool-use for Asana actions."""
     try:
+        # Look up who's messaging and get their personalized Asana client
+        user_info, user_asana = get_user_info(user_phone)
+        user_name = user_info.get('name', 'there')
+        logger.info(f"Processing message for {user_name} ({user_phone})")
+
         add_to_history(user_phone, "user", user_message)
         messages = get_conversation_history(user_phone)
+
+        # Get personalized system prompt and tools for this user
+        system_prompt = get_system_prompt(user_name)
+        tools = get_asana_tools(user_name)
 
         # Initial Claude call with tools
         response = anthropic_client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1500,
-            system=SYSTEM_PROMPT,
-            tools=ASANA_TOOLS,
+            system=system_prompt,
+            tools=tools,
             messages=messages
         )
 
@@ -366,8 +335,6 @@ def process_message_with_claude(user_message, user_phone):
 
         while response.stop_reason == "tool_use" and iteration < max_iterations:
             iteration += 1
-
-            # Collect all tool uses from the response
             tool_results = []
             assistant_content = response.content
 
@@ -375,9 +342,9 @@ def process_message_with_claude(user_message, user_phone):
                 if block.type == "tool_use":
                     tool_name = block.name
                     tool_input = block.input
-                    logger.info(f"Tool call: {tool_name}({json.dumps(tool_input)})")
+                    logger.info(f"[{user_name}] Tool call: {tool_name}({json.dumps(tool_input)})")
 
-                    result = execute_tool(tool_name, tool_input)
+                    result = execute_tool(tool_name, tool_input, user_asana)
                     logger.info(f"Tool result preview: {result[:200]}")
 
                     tool_results.append({
@@ -394,8 +361,8 @@ def process_message_with_claude(user_message, user_phone):
             response = anthropic_client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=1500,
-                system=SYSTEM_PROMPT,
-                tools=ASANA_TOOLS,
+                system=system_prompt,
+                tools=tools,
                 messages=get_conversation_history(user_phone)
             )
 
@@ -410,7 +377,6 @@ def process_message_with_claude(user_message, user_phone):
 
         # Save the final assistant response in a clean format for history
         add_to_history(user_phone, "assistant", final_text)
-
         return final_text
 
     except Exception as e:
@@ -423,7 +389,6 @@ def format_for_whatsapp(text):
     lines = text.split('\n')
     formatted = []
     for line in lines:
-        # Remove markdown headers but keep WhatsApp bold (*text*)
         line = line.replace('## ', '').replace('### ', '').replace('# ', '')
         formatted.append(line)
     return '\n'.join(formatted)
@@ -467,11 +432,9 @@ def split_message(text, max_len=1500):
     """Split a long message into WhatsApp-friendly chunks."""
     if len(text) <= max_len:
         return [text]
-
     chunks = []
     lines = text.split('\n')
     current_chunk = ""
-
     for line in lines:
         if len(current_chunk) + len(line) + 1 > max_len:
             if current_chunk:
@@ -479,10 +442,8 @@ def split_message(text, max_len=1500):
             current_chunk = line + '\n'
         else:
             current_chunk += line + '\n'
-
     if current_chunk.strip():
         chunks.append(current_chunk.strip())
-
     return chunks if chunks else [text[:max_len]]
 
 
@@ -491,30 +452,34 @@ def health():
     return {
         'status': 'ok',
         'timestamp': datetime.utcnow().isoformat(),
-        'service': 'asana-whatsapp-agent'
+        'service': 'asana-whatsapp-agent',
+        'users': len(USERS)
     }, 200
 
 
-# ─── Digest Scheduler ───
+# ─── Digest Scheduler (Multi-User) ───
 
 def send_morning_digest():
-    """Generate and send morning digest."""
+    """Generate and send morning digest to ALL registered users."""
     try:
-        logger.info("Generating morning digest...")
-        digest_text = generate_digest(asana_client)
-        digest_text = format_for_whatsapp(digest_text)
+        for phone_key, user_info in USERS.items():
+            user_name = user_info['name']
+            user_phone = phone_key.replace('whatsapp:', '')
+            user_asana = user_asana_clients[phone_key]
 
-        user_phone = os.getenv('DIGEST_RECIPIENT_PHONE', '+19545042855')
+            logger.info(f"Generating morning digest for {user_name}...")
+            digest_text = generate_digest(user_asana, user_name=user_name)
+            digest_text = format_for_whatsapp(digest_text)
 
-        chunks = split_message(digest_text, max_len=1500)
-        for chunk in chunks:
-            send_whatsapp_message(
-                to_number=user_phone,
-                message=chunk,
-                config=config
-            )
+            chunks = split_message(digest_text, max_len=1500)
+            for chunk in chunks:
+                send_whatsapp_message(
+                    to_number=user_phone,
+                    message=chunk,
+                    config=config
+                )
+            logger.info(f"Morning digest sent to {user_name} ({user_phone})")
 
-        logger.info("Morning digest sent successfully")
     except Exception as e:
         logger.error(f"Error sending morning digest: {str(e)}")
 
@@ -524,12 +489,7 @@ def init_scheduler():
     est = pytz.timezone('US/Eastern')
     scheduler.add_job(
         send_morning_digest,
-        CronTrigger(
-            hour=10,
-            minute=0,
-            day_of_week='0-4',
-            timezone=est
-        ),
+        CronTrigger(hour=10, minute=0, day_of_week='0-4', timezone=est),
         id='morning_digest',
         name='Send morning digest',
         replace_existing=True

@@ -4,17 +4,18 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
-def generate_digest(asana_client):
+def generate_digest(asana_client, user_name="Fredy Hernandez"):
     """Generate a formatted morning digest from Asana data."""
     try:
         parts = []
+        first_name = user_name.split()[0]
 
         now = datetime.now()
         day_name = now.strftime('%A')
         date_str = now.strftime('%B %d, %Y')
 
         # ── Header ──
-        parts.append(f"Good morning, Fredy \u2615\n")
+        parts.append(f"Good morning, {first_name} \u2615\n")
         parts.append(f"\U0001f4c5 *{day_name}, {date_str}*\n")
         parts.append("\u2500" * 20 + "\n")
 
