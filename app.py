@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import threading
 from datetime import datetime
 from flask import Flask, request, Response
 from anthropic import Anthropic
@@ -472,20 +473,10 @@ def format_for_whatsapp(text):
     return '\n'.join(formatted)
 
 
-# ─── Routes ───
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Receive WhatsApp messages from Twilio and respond."""
+def process_and_reply(incoming_message, sender_phone):
+    """Background worker: process message with Claude and send reply via WhatsApp."""
     try:
-        incoming_message = request.form.get('Body', '').strip()
-        sender_phone = request.form.get('From', '').replace('whatsapp:', '')
-
-        if not incoming_message:
-            return Response('', status=200)
-
-        logger.info(f"Received message from {sender_phone}: {incoming_message}")
-
+        logger.info(f"[BG] Processing message for {sender_phone}: {incoming_message[:80]}")
         response_text = process_message_with_claude(incoming_message, sender_phone)
         response_text = format_for_whatsapp(response_text)
 
@@ -498,7 +489,44 @@ def webhook():
                 config=config
             )
 
-        logger.info(f"Sent {len(chunks)} message(s) to {sender_phone}")
+        logger.info(f"[BG] Sent {len(chunks)} message(s) to {sender_phone}")
+    except Exception as e:
+        logger.error(f"[BG] Error processing message for {sender_phone}: {str(e)}")
+        # Try to send an error message back
+        try:
+            send_whatsapp_message(
+                to_number=sender_phone,
+                message="\u26a0\ufe0f Sorry, I hit an error processing your message. Try again in a sec.",
+                config=config
+            )
+        except Exception:
+            logger.error(f"[BG] Failed to send error message to {sender_phone}")
+
+
+# ─── Routes ───
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Receive WhatsApp messages from Twilio and respond asynchronously."""
+    try:
+        incoming_message = request.form.get('Body', '').strip()
+        sender_phone = request.form.get('From', '').replace('whatsapp:', '')
+
+        if not incoming_message:
+            return Response('', status=200)
+
+        logger.info(f"Received message from {sender_phone}: {incoming_message}")
+
+        # Process in background thread so we return 200 to Twilio immediately.
+        # This prevents gunicorn worker timeouts and Twilio retry storms.
+        thread = threading.Thread(
+            target=process_and_reply,
+            args=(incoming_message, sender_phone),
+            daemon=True
+        )
+        thread.start()
+
+        # Return 200 immediately — Twilio is happy, worker is free
         return Response('', status=200)
 
     except Exception as e:
