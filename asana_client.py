@@ -403,10 +403,18 @@ class AsanaClient:
         """Mark a task as complete."""
         return self.update_task(task_id, {'completed': True})
 
-    def add_comment(self, task_id, text):
-        """Add a comment to a task (posted as the PAT owner = Fredy)."""
+    def add_comment(self, task_id, text, mention_gids=None):
+        """Add a comment to a task. If mention_gids provided, uses html_text for proper @mentions."""
         try:
-            json_data = {'data': {'text': text}}
+            if mention_gids:
+                # Build Asana rich-text mentions: <a data-asana-gid="GID"/> renders as @Name
+                mention_tags = ' '.join(
+                    [f'<a data-asana-gid="{gid}"/>' for gid in mention_gids]
+                )
+                html_body = f'<body>{mention_tags} {text}</body>'
+                json_data = {'data': {'html_text': html_body}}
+            else:
+                json_data = {'data': {'text': text}}
             response = self._make_request('POST', f'/tasks/{task_id}/stories', json_data=json_data)
             return response.get('data', {})
 

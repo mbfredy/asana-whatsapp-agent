@@ -10,6 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 import pytz
 
 from asana_client import AsanaClient
+from box_client import BoxClient
 from digest import generate_digest
 from send_whatsapp import send_whatsapp_message
 
@@ -70,6 +71,27 @@ for phone_key, user_info in USERS.items():
 
 # Keep a default client for backward compatibility
 asana_client = AsanaClient(config.get('asana_pat'))
+
+# ─── Box Setup ───
+box_client = None
+box_client_id = os.getenv('BOX_CLIENT_ID')
+box_client_secret = os.getenv('BOX_CLIENT_SECRET')
+box_enterprise_id = os.getenv('BOX_ENTERPRISE_ID')
+box_user_id = os.getenv('BOX_USER_ID')
+
+if box_client_id and box_client_secret:
+    try:
+        box_client = BoxClient(
+            client_id=box_client_id,
+            client_secret=box_client_secret,
+            enterprise_id=box_enterprise_id,
+            user_id=box_user_id
+        )
+        logger.info("Box client initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize Box client: {e}")
+else:
+    logger.info("Box credentials not configured — Box tools disabled")
 
 # Conversation history storage (per user)
 conversation_history = {}
@@ -152,8 +174,8 @@ def get_asana_tools(user_name, role="chief_of_staff"):
         },
         {
             "name": "add_comment",
-            "description": f"Add a comment to a task. The comment will be posted as {user_name}.",
-            "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The Asana task GID"}, "text": {"type": "string", "description": "The comment text to post"}}, "required": ["task_id", "text"]}
+            "description": f"Add a comment to a task. The comment will be posted as {user_name}. To @mention/tag a coworker so they get notified, first use find_team_member to get their user GID, then pass the GID(s) in mention_gids. This creates a real Asana @mention — not just text.",
+            "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The Asana task GID"}, "text": {"type": "string", "description": "The comment text to post"}, "mention_gids": {"type": "array", "items": {"type": "string"}, "description": "Optional list of user GIDs to @mention/tag in the comment. Use find_team_member first to get GIDs."}}, "required": ["task_id", "text"]}
         },
         {
             "name": "assign_task",
@@ -182,10 +204,41 @@ def get_asana_tools(user_name, role="chief_of_staff"):
         }
     ]
 
+    # Box tools — only added if Box client is configured
+    box_tools = []
+    if box_client:
+        box_tools = [
+            {
+                "name": "box_search",
+                "description": "Search for files and folders in Box by name or content. Use when the user asks about a document, asset, file, or deliverable stored in Box.",
+                "input_schema": {"type": "object", "properties": {"query": {"type": "string", "description": "Search query — file name, keyword, or content"}}, "required": ["query"]}
+            },
+            {
+                "name": "box_get_file_info",
+                "description": "Get detailed info about a specific Box file: name, size, who modified it, path, shared link.",
+                "input_schema": {"type": "object", "properties": {"file_id": {"type": "string", "description": "The Box file ID"}}, "required": ["file_id"]}
+            },
+            {
+                "name": "box_list_folder",
+                "description": "List the contents of a Box folder. Use folder_id '0' for the root. Use box_find_folder first if you only have the folder name.",
+                "input_schema": {"type": "object", "properties": {"folder_id": {"type": "string", "description": "The Box folder ID (use '0' for root)", "default": "0"}}, "required": []}
+            },
+            {
+                "name": "box_get_shared_link",
+                "description": "Get or create a shareable link for a Box file so the user can open it directly.",
+                "input_schema": {"type": "object", "properties": {"file_id": {"type": "string", "description": "The Box file ID"}}, "required": ["file_id"]}
+            },
+            {
+                "name": "box_find_folder",
+                "description": "Search for a folder by name in Box. Returns matching folder IDs that can be used with box_list_folder.",
+                "input_schema": {"type": "object", "properties": {"folder_name": {"type": "string", "description": "Name of the folder to find"}}, "required": ["folder_name"]}
+            },
+        ]
+
     # PM role gets team-wide tools added
     if role == "project_manager":
-        return pm_tools + base_tools
-    return base_tools
+        return pm_tools + base_tools + box_tools
+    return base_tools + box_tools
 
 
 def get_system_prompt(user_name, role="chief_of_staff", project_name=None):
@@ -245,6 +298,13 @@ TONE AND STYLE:
 - Don't sugarcoat — if something is behind, say so directly
 - Compress when there's a lot, expand when {first_name} asks for detail
 
+BOX INTEGRATION:
+- You also have access to Box (file storage). If {first_name} asks about documents, files, assets, or deliverables, use the box_ tools to search and retrieve info.
+- Use box_search to find files, box_get_file_info for details, box_list_folder to browse, and box_get_shared_link to share links.
+
+TAGGING / @MENTIONS:
+- When {first_name} asks you to tag or @mention someone on a task, ALWAYS use find_team_member first to get their user GID, then pass it in mention_gids when calling add_comment. This creates a real Asana notification — not just plain text.
+
 BEHAVIOR RULES:
 - Do not invent missing information.
 - If a task has no assignee, flag it.
@@ -289,6 +349,13 @@ End with: \U0001f3af *Top priority today:* [single most important item]
 
 TONE: Concise, direct, sharp, calm, executive-friendly.
 
+BOX INTEGRATION:
+- You also have access to Box (file storage). If {first_name} asks about documents, files, assets, or deliverables, use the box_ tools to search and retrieve info.
+- Use box_search to find files, box_get_file_info for details, box_list_folder to browse, and box_get_shared_link to share links.
+
+TAGGING / @MENTIONS:
+- When {first_name} asks you to tag or @mention someone on a task, ALWAYS use find_team_member first to get their user GID, then pass it in mention_gids when calling add_comment. This creates a real Asana notification — not just plain text.
+
 BEHAVIOR RULES:
 - Do not invent missing information.
 - If a task is weak, say exactly why.
@@ -322,7 +389,8 @@ def execute_tool(tool_name, tool_input, user_asana, project_gid=None):
             result = user_asana.complete_task(tool_input["task_id"])
             return json.dumps(result, default=str)
         elif tool_name == "add_comment":
-            result = user_asana.add_comment(tool_input["task_id"], tool_input["text"])
+            mention_gids = tool_input.get("mention_gids", None)
+            result = user_asana.add_comment(tool_input["task_id"], tool_input["text"], mention_gids=mention_gids)
             return json.dumps(result, default=str)
         elif tool_name == "assign_task":
             user = user_asana.find_user_by_name(tool_input["assignee_name"])
@@ -361,6 +429,33 @@ def execute_tool(tool_name, tool_input, user_asana, project_gid=None):
             return json.dumps(result, default=str)
         elif tool_name == "get_unassigned_tasks":
             result = user_asana.get_unassigned_tasks(project_gid=project_gid)
+            return json.dumps(result, default=str)
+        # ─── Box Tools ───
+        elif tool_name == "box_search":
+            if not box_client:
+                return json.dumps({"error": "Box is not configured"})
+            result = box_client.search(tool_input["query"])
+            return json.dumps(result, default=str)
+        elif tool_name == "box_get_file_info":
+            if not box_client:
+                return json.dumps({"error": "Box is not configured"})
+            result = box_client.get_file_info(tool_input["file_id"])
+            return json.dumps(result, default=str)
+        elif tool_name == "box_list_folder":
+            if not box_client:
+                return json.dumps({"error": "Box is not configured"})
+            folder_id = tool_input.get("folder_id", "0")
+            result = box_client.list_folder(folder_id)
+            return json.dumps(result, default=str)
+        elif tool_name == "box_get_shared_link":
+            if not box_client:
+                return json.dumps({"error": "Box is not configured"})
+            result = box_client.get_shared_link(tool_input["file_id"])
+            return json.dumps(result, default=str)
+        elif tool_name == "box_find_folder":
+            if not box_client:
+                return json.dumps({"error": "Box is not configured"})
+            result = box_client.get_folder_by_name(tool_input["folder_name"])
             return json.dumps(result, default=str)
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
