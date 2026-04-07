@@ -10,7 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 import pytz
 
 from asana_client import AsanaClient
-from digest import generate_digest
+from digest import generate_digest, generate_evening_recap
 from send_whatsapp import send_whatsapp_message
 
 try:
@@ -700,6 +700,37 @@ def send_morning_digest():
         logger.error(f"Error sending morning digest: {str(e)}")
 
 
+def send_evening_recap():
+    """Generate and send 6pm evening recap to ALL registered users."""
+    try:
+        for phone_key, user_info in USERS.items():
+            user_name = user_info['name']
+            user_phone = phone_key.replace('whatsapp:', '')
+            user_asana = user_asana_clients[phone_key]
+
+            user_role = user_info.get('role', 'chief_of_staff')
+            user_project_gid = user_info.get('project_gid', None)
+            user_project_name = user_info.get('project_name', None)
+            logger.info(f"Generating evening recap for {user_name} (role: {user_role})...")
+            recap_text = generate_evening_recap(
+                user_asana, user_name=user_name, role=user_role,
+                project_gid=user_project_gid, project_name=user_project_name
+            )
+            recap_text = format_for_whatsapp(recap_text)
+
+            chunks = split_message(recap_text, max_len=1500)
+            for chunk in chunks:
+                send_whatsapp_message(
+                    to_number=user_phone,
+                    message=chunk,
+                    config=config
+                )
+            logger.info(f"Evening recap sent to {user_name} ({user_phone})")
+
+    except Exception as e:
+        logger.error(f"Error sending evening recap: {str(e)}")
+
+
 def init_scheduler():
     scheduler = BackgroundScheduler()
     est = pytz.timezone('US/Eastern')
@@ -710,8 +741,15 @@ def init_scheduler():
         name='Send morning digest',
         replace_existing=True
     )
+    scheduler.add_job(
+        send_evening_recap,
+        CronTrigger(hour=18, minute=0, day_of_week='0-4', timezone=est),
+        id='evening_recap',
+        name='Send evening recap',
+        replace_existing=True
+    )
     scheduler.start()
-    logger.info("Scheduler initialized - digest at 10:00 AM EST weekdays")
+    logger.info("Scheduler initialized - morning digest 10:00 AM, evening recap 6:00 PM EST weekdays")
     return scheduler
 
 

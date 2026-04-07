@@ -129,6 +129,142 @@ def generate_pm_digest(asana_client, user_name="Daniella Aservi", project_gid=No
         return "\u26a0\ufe0f Unable to generate morning digest. Reply with a message and I'll pull the info manually."
 
 
+def generate_evening_recap(asana_client, user_name="Fredy Hernandez", role="chief_of_staff", project_gid=None, project_name=None):
+    """Generate a 6pm evening recap: mentions, new tasks, comments, and movement from today."""
+    try:
+        parts = []
+        first_name = user_name.split()[0]
+        now = datetime.now()
+        today_str = now.strftime('%Y-%m-%d')
+        day_name = now.strftime('%A')
+
+        parts.append(f"Hey {first_name} \U0001f44b End-of-day recap:\n")
+        parts.append(f"\U0001f4c5 *{day_name} Wrap-Up*\n")
+        if project_name:
+            parts.append(f"\U0001f4c1 *{project_name}*\n")
+        parts.append("\u2500" * 20 + "\n")
+
+        has_content = False
+
+        # ── Tasks completed today ──
+        try:
+            # Search for tasks completed today
+            asana_client._ensure_user_info()
+            from datetime import timedelta
+            params = {
+                'opt_fields': 'gid,name,assignee.name,projects.name,completed_at',
+                'completed_on.after': today_str,
+                'completed': 'true',
+                'is_subtask': 'false',
+                'sort_by': 'modified_at',
+                'sort_ascending': 'false',
+                'limit': 20
+            }
+            if project_gid:
+                params['projects.any'] = project_gid
+            elif role != "project_manager":
+                params['assignee.any'] = asana_client._user_gid
+
+            response = asana_client._make_request(
+                'GET',
+                f'/workspaces/{asana_client._workspace_gid}/tasks/search',
+                params=params
+            )
+            completed = response.get('data', [])
+            if completed:
+                has_content = True
+                parts.append(f"\n\u2705 *COMPLETED TODAY* ({len(completed)})\n")
+                for t in completed[:10]:
+                    assignee = t.get('assignee', {})
+                    name = assignee.get('name', '') if assignee else ''
+                    task_label = f"   \u2022 {t['name']}"
+                    if name and role == "project_manager":
+                        task_label += f"  (\U0001f464 {name})"
+                    parts.append(task_label + "\n")
+        except Exception as e:
+            logger.error(f"Evening recap completed tasks error: {e}")
+
+        # ── New tasks created today ──
+        try:
+            new_tasks = asana_client.get_new_tasks_assigned(days=1)
+            if new_tasks:
+                has_content = True
+                parts.append(f"\n\U0001f195 *NEW TASKS ASSIGNED TODAY* ({len(new_tasks)})\n")
+                for t in new_tasks[:8]:
+                    project = t.get('projects', [{}])[0].get('name', '') if t.get('projects') else ''
+                    assignee = t.get('assignee', {})
+                    name = assignee.get('name', '') if assignee else ''
+                    parts.append(f"   \u2022 {t['name']}\n")
+                    meta = []
+                    if name:
+                        meta.append(f"\U0001f464 {name}")
+                    if project:
+                        meta.append(f"\U0001f4c1 {project}")
+                    if t.get('due_on'):
+                        meta.append(f"Due {t['due_on']}")
+                    if meta:
+                        parts.append(f"      {'  \u2022  '.join(meta)}\n")
+        except Exception as e:
+            logger.error(f"Evening recap new tasks error: {e}")
+
+        # ── Mentions & comments on tasks you follow ──
+        try:
+            mentioned = asana_client.get_tasks_with_recent_comments(days=1)
+            if mentioned:
+                has_content = True
+                parts.append(f"\n\U0001f4ac *COMMENTS & MENTIONS*\n")
+                for t in mentioned[:8]:
+                    project = t.get('projects', [{}])[0].get('name', '') if t.get('projects') else ''
+                    parts.append(f"   \u2022 {t['name']}")
+                    if project:
+                        parts.append(f"  ({project})")
+                    parts.append("\n")
+        except Exception as e:
+            logger.error(f"Evening recap mentions error: {e}")
+
+        # ── Recently modified tasks (movement/updates) ──
+        try:
+            recent = asana_client.get_recent_tasks(days=1)
+            # Filter out tasks already shown above
+            shown_gids = set()
+            if 'completed' in dir() and completed:
+                shown_gids.update(t.get('gid', '') for t in completed)
+            if 'new_tasks' in dir() and new_tasks:
+                shown_gids.update(t.get('gid', '') for t in new_tasks)
+            if 'mentioned' in dir() and mentioned:
+                shown_gids.update(t.get('gid', '') for t in mentioned)
+
+            updated = [t for t in recent if t.get('gid') not in shown_gids]
+            if updated:
+                has_content = True
+                parts.append(f"\n\U0001f504 *OTHER UPDATES*\n")
+                for t in updated[:8]:
+                    project = t.get('projects', [{}])[0].get('name', '') if t.get('projects') else ''
+                    assignee = t.get('assignee', {})
+                    name = assignee.get('name', '') if assignee else ''
+                    parts.append(f"   \u2022 {t['name']}")
+                    if name:
+                        parts.append(f"  (\U0001f464 {name})")
+                    if project:
+                        parts.append(f"  \u2022  {project}")
+                    parts.append("\n")
+        except Exception as e:
+            logger.error(f"Evening recap recent error: {e}")
+
+        # ── If nothing happened today ──
+        if not has_content:
+            parts.append(f"\n\U0001f54a Quiet day \u2014 no new tasks, mentions, or updates to report.\n")
+
+        parts.append("\n" + "\u2500" * 20 + "\n")
+        parts.append(f"\U0001f4ac Reply if you need to check on anything before EOD.\n")
+
+        return ''.join(parts)
+
+    except Exception as e:
+        logger.error(f"Error generating evening recap: {str(e)}")
+        return "\u26a0\ufe0f Unable to generate evening recap. Reply with a message and I'll check manually."
+
+
 def generate_digest(asana_client, user_name="Fredy Hernandez", role="chief_of_staff", project_gid=None, project_name=None):
     """Generate a formatted morning digest from Asana data."""
     if role == "project_manager":
