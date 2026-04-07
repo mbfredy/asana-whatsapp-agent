@@ -10,9 +10,15 @@ from apscheduler.triggers.cron import CronTrigger
 import pytz
 
 from asana_client import AsanaClient
-from box_client import BoxClient
 from digest import generate_digest
 from send_whatsapp import send_whatsapp_message
+
+try:
+    from box_client import BoxClient
+    BOX_AVAILABLE = True
+except Exception:
+    BoxClient = None
+    BOX_AVAILABLE = False
 
 # Configure logging
 logging.basicConfig(
@@ -74,24 +80,27 @@ asana_client = AsanaClient(config.get('asana_pat'))
 
 # ─── Box Setup ───
 box_client = None
-box_client_id = os.getenv('BOX_CLIENT_ID')
-box_client_secret = os.getenv('BOX_CLIENT_SECRET')
-box_enterprise_id = os.getenv('BOX_ENTERPRISE_ID')
-box_user_id = os.getenv('BOX_USER_ID')
+if BOX_AVAILABLE:
+    box_client_id = os.getenv('BOX_CLIENT_ID')
+    box_client_secret = os.getenv('BOX_CLIENT_SECRET')
+    box_enterprise_id = os.getenv('BOX_ENTERPRISE_ID')
+    box_user_id = os.getenv('BOX_USER_ID')
 
-if box_client_id and box_client_secret:
-    try:
-        box_client = BoxClient(
-            client_id=box_client_id,
-            client_secret=box_client_secret,
-            enterprise_id=box_enterprise_id,
-            user_id=box_user_id
-        )
-        logger.info("Box client initialized")
-    except Exception as e:
-        logger.error(f"Failed to initialize Box client: {e}")
+    if box_client_id and box_client_secret:
+        try:
+            box_client = BoxClient(
+                client_id=box_client_id,
+                client_secret=box_client_secret,
+                enterprise_id=box_enterprise_id,
+                user_id=box_user_id
+            )
+            logger.info("Box client initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Box client: {e}")
+    else:
+        logger.info("Box credentials not configured — Box tools disabled")
 else:
-    logger.info("Box credentials not configured — Box tools disabled")
+    logger.info("boxsdk not available — Box tools disabled")
 
 # Conversation history storage (per user)
 conversation_history = {}

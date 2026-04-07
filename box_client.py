@@ -1,7 +1,13 @@
 import logging
-from boxsdk import CCGAuth, Client
 
 logger = logging.getLogger(__name__)
+
+try:
+    from boxsdk import CCGAuth, Client
+    BOX_SDK_AVAILABLE = True
+except ImportError:
+    logger.warning("boxsdk not installed — Box features disabled")
+    BOX_SDK_AVAILABLE = False
 
 
 class BoxClient:
@@ -12,6 +18,10 @@ class BoxClient:
         Initialize Box client with CCG authentication.
         Provide enterprise_id for app-level access, or user_id for user-scoped access.
         """
+        if not BOX_SDK_AVAILABLE:
+            logger.error("Cannot initialize BoxClient — boxsdk not installed")
+            self.client = None
+            return
         try:
             if user_id:
                 auth = CCGAuth(
