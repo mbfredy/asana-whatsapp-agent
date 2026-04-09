@@ -104,7 +104,50 @@ else:
 
 # Conversation history storage (per user)
 conversation_history = {}
-MAX_HISTORY = 20
+MAX_HISTORY = 10  # Reduced from 20 — saves significant tokens per API call
+
+# ─── Cost Optimization: Tool Result Truncation ───
+MAX_TOOL_RESULT_CHARS = 2000  # Truncate large tool results stored in history
+
+def truncate_tool_result(result_str):
+    """Truncate tool results to avoid bloating conversation history with huge JSON."""
+    if len(result_str) <= MAX_TOOL_RESULT_CHARS:
+        return result_str
+    return result_str[:MAX_TOOL_RESULT_CHARS] + f"\n... [truncated — {len(result_str)} chars total]"
+
+
+# ─── Cost Optimization: Smart Model Routing ───
+# Use Haiku for simple messages, Sonnet only for complex ones that need reasoning
+
+SIMPLE_PATTERNS = [
+    # Greetings / acknowledgments
+    "thanks", "thank you", "ok", "okay", "got it", "cool", "nice", "great",
+    "good morning", "good afternoon", "good evening", "hey", "hi", "hello",
+    "yo", "sup", "gm", "bye", "later", "peace",
+    # Simple confirmations
+    "yes", "no", "yep", "nope", "sure", "nah", "yeah",
+]
+
+def classify_message_complexity(message):
+    """Determine if a message needs Sonnet (complex) or can use Haiku (simple).
+    Returns 'haiku' or 'sonnet'."""
+    msg_lower = message.strip().lower().rstrip('!?.,:;')
+
+    # Very short messages that are just greetings/acknowledgments → Haiku
+    if msg_lower in SIMPLE_PATTERNS:
+        return "haiku"
+
+    # Short messages (under 15 chars) that don't ask for actions → Haiku
+    if len(msg_lower) < 15 and not any(kw in msg_lower for kw in [
+        "task", "update", "assign", "complete", "tag", "comment", "search",
+        "find", "create", "add", "move", "change", "set", "mark", "due",
+        "brief", "status", "what", "who", "how", "show", "list", "get",
+        "overdue", "mention", "box", "file", "folder", "doc"
+    ]):
+        return "haiku"
+
+    # Everything else → Sonnet (tool use, complex queries, analysis)
+    return "sonnet"
 
 
 def get_user_info(sender_phone):
@@ -489,7 +532,11 @@ def add_to_history(user_phone, role, content):
 
 
 def process_message_with_claude(user_message, user_phone):
-    """Process user message with Claude using tool-use for Asana actions."""
+    """Process user message with Claude using tool-use for Asana actions.
+
+    Cost optimization: routes simple messages to Haiku, complex ones to Sonnet.
+    Truncates tool results in history to prevent token bloat.
+    """
     try:
         # Look up who's messaging and get their personalized Asana client
         user_info, user_asana = get_user_info(user_phone)
@@ -506,17 +553,36 @@ def process_message_with_claude(user_message, user_phone):
         system_prompt = get_system_prompt(user_name, role=user_role, project_name=user_project_name)
         tools = get_asana_tools(user_name, role=user_role)
 
-        # Initial Claude call with tools
-        response = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1500,
-            system=system_prompt,
-            tools=tools,
-            messages=messages
-        )
+        # ─── Smart Model Routing ───
+        complexity = classify_message_complexity(user_message)
+        if complexity == "haiku":
+            # Simple message — use Haiku, no tools, shorter max_tokens
+            model = "claude-haiku-4-5-20251001"
+            max_tokens = 300
+            use_tools = False
+            logger.info(f"[{user_name}] Routed to HAIKU (simple message)")
+        else:
+            # Complex message — use Sonnet with full tools
+            model = "claude-sonnet-4-6"
+            max_tokens = 1500
+            use_tools = True
+            logger.info(f"[{user_name}] Routed to SONNET (complex message)")
+
+        # Initial Claude call
+        call_kwargs = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system_prompt,
+            "messages": messages,
+        }
+        if use_tools:
+            call_kwargs["tools"] = tools
+
+        response = anthropic_client.messages.create(**call_kwargs)
 
         # Tool-use loop: keep going until Claude gives a text response
-        max_iterations = 8
+        # (only triggers when using Sonnet with tools)
+        max_iterations = 5  # Reduced from 8 — most queries resolve in 2-3
         iteration = 0
 
         while response.stop_reason == "tool_use" and iteration < max_iterations:
@@ -528,7 +594,7 @@ def process_message_with_claude(user_message, user_phone):
                 if block.type == "tool_use":
                     tool_name = block.name
                     tool_input = block.input
-                    logger.info(f"[{user_name}] Tool call: {tool_name}({json.dumps(tool_input)})")
+                    logger.info(f"[{user_name}] Tool call #{iteration}: {tool_name}({json.dumps(tool_input)})")
 
                     result = execute_tool(tool_name, tool_input, user_asana, project_gid=user_project_gid)
                     logger.info(f"Tool result preview: {result[:200]}")
@@ -536,20 +602,35 @@ def process_message_with_claude(user_message, user_phone):
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": result
+                        "content": result  # Full result sent to Claude for this turn
                     })
 
-            # Add assistant message + tool results to history
+            # Add assistant message to history
             add_to_history(user_phone, "assistant", assistant_content)
-            add_to_history(user_phone, "user", tool_results)
+
+            # Store TRUNCATED tool results in history to save tokens on future calls
+            truncated_results = []
+            for tr in tool_results:
+                truncated_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tr["tool_use_id"],
+                    "content": truncate_tool_result(tr["content"])
+                })
+            add_to_history(user_phone, "user", truncated_results)
+
+            # Build messages for the next call — use FULL results for current turn
+            next_messages = get_conversation_history(user_phone)
+            # Replace the last (truncated) tool results with full ones for this call
+            if next_messages and next_messages[-1].get("role") == "user":
+                next_messages = next_messages[:-1] + [{"role": "user", "content": tool_results}]
 
             # Call Claude again with the tool results
             response = anthropic_client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=1500,
+                model=model,
+                max_tokens=max_tokens,
                 system=system_prompt,
                 tools=tools,
-                messages=get_conversation_history(user_phone)
+                messages=next_messages
             )
 
         # Extract final text response
@@ -736,20 +817,20 @@ def init_scheduler():
     est = pytz.timezone('US/Eastern')
     scheduler.add_job(
         send_morning_digest,
-        CronTrigger(hour=10, minute=0, day_of_week='0-4', timezone=est),
+        CronTrigger(hour=10, minute=0, day_of_week='0,4', timezone=est),
         id='morning_digest',
         name='Send morning digest',
         replace_existing=True
     )
     scheduler.add_job(
         send_evening_recap,
-        CronTrigger(hour=18, minute=0, day_of_week='0-4', timezone=est),
+        CronTrigger(hour=18, minute=0, day_of_week='0,4', timezone=est),
         id='evening_recap',
         name='Send evening recap',
         replace_existing=True
     )
     scheduler.start()
-    logger.info("Scheduler initialized - morning digest 10:00 AM, evening recap 6:00 PM EST weekdays")
+    logger.info("Scheduler initialized - morning digest 10:00 AM, evening recap 6:00 PM EST on Mon & Fri")
     return scheduler
 
 
